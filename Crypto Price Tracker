@@ -1,0 +1,56 @@
+import requests
+import time
+from prettytable import PrettyTable
+from colorama import Fore, Style
+
+# Function to get crypto prices
+def get_crypto_prices():
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {
+        "ids": "bitcoin,ethereum,cardano,solana,dogecoin",
+        "vs_currencies": "usd,inr",
+        "include_24hr_change": "true"
+    }
+    
+    try:
+        response = requests.get(url, params=params)
+        data = response.json()
+        return data
+    except Exception as e:
+        print("⚠️ Error fetching data:", e)
+        return None
+
+# Function to display prices in a table
+def display_prices(data):
+    table = PrettyTable()
+    table.field_names = ["Coin", "Price (USD)", "Price (INR)", "24h Change (%)"]
+    
+    for coin, values in data.items():
+        usd_price = values["usd"]
+        inr_price = values["inr"]
+        change_24h = values.get("usd_24h_change", 0)
+
+        # Color formatting for price change
+        if change_24h > 0:
+            change_24h = Fore.GREEN + f"{change_24h:.2f}%" + Style.RESET_ALL
+        else:
+            change_24h = Fore.RED + f"{change_24h:.2f}%" + Style.RESET_ALL
+
+        table.add_row([coin.capitalize(), f"${usd_price}", f"₹{inr_price}", change_24h])
+
+    print(table)
+
+# Main loop
+def main():
+    while True:
+        print("\n📊 Live Crypto Prices (Updated every 10 sec)")
+        data = get_crypto_prices()
+        if data:
+            display_prices(data)
+        else:
+            print("⚠️ Unable to fetch data. Check your internet connection.")
+        
+        time.sleep(10)  # Refresh every 10 seconds
+
+if __name__ == "__main__":
+    main()
