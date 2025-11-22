@@ -1,56 +1,470 @@
 import requests
 import time
+import os
+import sys
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 from prettytable import PrettyTable
-from colorama import Fore, Style
+from colorama import Fore, Style, init
+import json
 
-# Function to get crypto prices
-def get_crypto_prices():
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {
-        "ids": "bitcoin,ethereum,cardano,solana,dogecoin",
-        "vs_currencies": "usd,inr",
-        "include_24hr_change": "true"
-    }
+# Initialize colorama for cross-platform color support
+init(autoreset=True)
+
+class CryptoTracker:
+    """Advanced cryptocurrency price tracker with multiple features"""
     
-    try:
-        response = requests.get(url, params=params)
-        data = response.json()
-        return data
-    except Exception as e:
-        print("⚠️ Error fetching data:", e)
-        return None
-
-# Function to display prices in a table
-def display_prices(data):
-    table = PrettyTable()
-    table.field_names = ["Coin", "Price (USD)", "Price (INR)", "24h Change (%)"]
-    
-    for coin, values in data.items():
-        usd_price = values["usd"]
-        inr_price = values["inr"]
-        change_24h = values.get("usd_24h_change", 0)
-
-        # Color formatting for price change
-        if change_24h > 0:
-            change_24h = Fore.GREEN + f"{change_24h:.2f}%" + Style.RESET_ALL
-        else:
-            change_24h = Fore.RED + f"{change_24h:.2f}%" + Style.RESET_ALL
-
-        table.add_row([coin.capitalize(), f"${usd_price}", f"₹{inr_price}", change_24h])
-
-    print(table)
-
-# Main loop
-def main():
-    while True:
-        print("\n📊 Live Crypto Prices (Updated every 10 sec)")
-        data = get_crypto_prices()
-        if data:
-            display_prices(data)
-        else:
-            print("⚠️ Unable to fetch data. Check your internet connection.")
+    def __init__(self):
+        self.base_url = "https://api.coingecko.com/api/v3"
+        self.default_coins = ["bitcoin", "ethereum", "cardano", "solana", "dogecoin", 
+                             "binancecoin", "ripple", "polkadot", "litecoin", "chainlink"]
+        self.currencies = ["usd", "inr", "eur", "gbp"]
+        self.selected_coins = self.default_coins[:5]
+        self.selected_currency = "usd"
+        self.refresh_interval = 10
+        self.price_history: Dict[str, List[float]] = {}
+        self.alerts: Dict[str, Dict[str, float]] = {}
+        self.request_count = 0
+        self.last_update = None
         
-        time.sleep(10)  # Refresh every 10 seconds
+    def clear_screen(self):
+        """Clear the terminal screen"""
+        os.system('cls' if os.name == 'nt' else 'clear')
+    
+    def get_available_coins(self) -> List[Dict]:
+        """Fetch list of available cryptocurrencies"""
+        try:
+            url = f"{self.base_url}/coins/list"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            return response.json()[:100]  # Return top 100 coins
+        except Exception as e:
+            print(f"{Fore.RED}⚠️ Error fetching coin list: {e}{Style.RESET_ALL}")
+            return []
+    
+    def get_crypto_prices(self, coins: Optional[List[str]] = None, 
+                         currencies: Optional[List[str]] = None) -> Optional[Dict]:
+        """Fetch cryptocurrency prices from CoinGecko API"""
+        if coins is None:
+            coins = self.selected_coins
+        if currencies is None:
+            currencies = [self.selected_currency]
+            
+        url = f"{self.base_url}/simple/price"
+        params = {
+            "ids": ",".join(coins),
+            "vs_currencies": ",".join(currencies),
+            "include_24hr_change": "true",
+            "include_24hr_vol": "true",
+            "include_market_cap": "true",
+            "include_last_updated_at": "true"
+        }
+        
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            self.request_count += 1
+            self.last_update = datetime.now()
+            data = response.json()
+            
+            # Update price history
+            for coin, values in data.items():
+                price_key = f"{self.selected_currency}"
+                if coin not in self.price_history:
+                    self.price_history[coin] = []
+                self.price_history[coin].append(values.get(price_key, 0))
+                # Keep only last 10 prices
+                if len(self.price_history[coin]) > 10:
+                    self.price_history[coin].pop(0)
+            
+            return data
+            
+        except requests.exceptions.Timeout:
+            print(f"{Fore.RED}⚠️ Request timeout. Check your internet connection.{Style.RESET_ALL}")
+        except requests.exceptions.RequestException as e:
+            print(f"{Fore.RED}⚠️ Error fetching data: {e}{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}⚠️ Unexpected error: {e}{Style.RESET_ALL}")
+        
+        return None
+    
+    def get_detailed_coin_info(self, coin_id: str) -> Optional[Dict]:
+        """Get detailed information about a specific coin"""
+        try:
+            url = f"{self.base_url}/coins/{coin_id}"
+            params = {
+                "localization": "false",
+                "tickers": "false",
+                "community_data": "false",
+                "developer_data": "false"
+            }
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"{Fore.RED}⚠️ Error fetching coin details: {e}{Style.RESET_ALL}")
+            return None
+    
+    def format_price(self, price: float) -> str:
+        """Format price with appropriate decimal places"""
+        if price >= 1000:
+            return f"{price:,.2f}"
+        elif price >= 1:
+            return f"{price:.2f}"
+        elif price >= 0.01:
+            return f"{price:.4f}"
+        else:
+            return f"{price:.8f}"
+    
+    def format_large_number(self, num: float) -> str:
+        """Format large numbers with abbreviations"""
+        if num >= 1_000_000_000_000:
+            return f"{num/1_000_000_000_000:.2f}T"
+        elif num >= 1_000_000_000:
+            return f"{num/1_000_000_000:.2f}B"
+        elif num >= 1_000_000:
+            return f"{num/1_000_000:.2f}M"
+        elif num >= 1_000:
+            return f"{num/1_000:.2f}K"
+        else:
+            return f"{num:.2f}"
+    
+    def get_trend_indicator(self, coin: str) -> str:
+        """Get price trend indicator based on history"""
+        if coin not in self.price_history or len(self.price_history[coin]) < 2:
+            return "➡️"
+        
+        recent_prices = self.price_history[coin][-3:]
+        if len(recent_prices) < 2:
+            return "➡️"
+        
+        if recent_prices[-1] > recent_prices[-2]:
+            return "📈"
+        elif recent_prices[-1] < recent_prices[-2]:
+            return "📉"
+        else:
+            return "➡️"
+    
+    def check_price_alerts(self, data: Dict):
+        """Check if any price alerts should be triggered"""
+        for coin, values in data.items():
+            if coin in self.alerts:
+                price = values.get(self.selected_currency, 0)
+                
+                if "above" in self.alerts[coin] and price >= self.alerts[coin]["above"]:
+                    print(f"\n{Fore.GREEN}🔔 ALERT: {coin.upper()} is above ${self.alerts[coin]['above']}!{Style.RESET_ALL}")
+                    del self.alerts[coin]["above"]
+                
+                if "below" in self.alerts[coin] and price <= self.alerts[coin]["below"]:
+                    print(f"\n{Fore.RED}🔔 ALERT: {coin.upper()} is below ${self.alerts[coin]['below']}!{Style.RESET_ALL}")
+                    del self.alerts[coin]["below"]
+                
+                # Remove coin from alerts if no conditions left
+                if not self.alerts[coin]:
+                    del self.alerts[coin]
+    
+    def display_prices(self, data: Dict):
+        """Display cryptocurrency prices in a formatted table"""
+        table = PrettyTable()
+        
+        # Currency symbols
+        currency_symbols = {"usd": "$", "inr": "₹", "eur": "€", "gbp": "£"}
+        symbol = currency_symbols.get(self.selected_currency, "$")
+        
+        table.field_names = [
+            "Coin", 
+            f"Price ({self.selected_currency.upper()})", 
+            "24h Change", 
+            "Market Cap",
+            "24h Volume",
+            "Trend"
+        ]
+        
+        # Styling
+        table.align = "l"
+        table.align[f"Price ({self.selected_currency.upper()})"] = "r"
+        table.align["24h Change"] = "r"
+        table.align["Market Cap"] = "r"
+        table.align["24h Volume"] = "r"
+        
+        for coin, values in sorted(data.items()):
+            price = values.get(self.selected_currency, 0)
+            change_24h = values.get(f"{self.selected_currency}_24h_change", 0)
+            market_cap = values.get(f"{self.selected_currency}_market_cap", 0)
+            volume_24h = values.get(f"{self.selected_currency}_24h_vol", 0)
+            
+            # Format price with color
+            formatted_price = f"{symbol}{self.format_price(price)}"
+            
+            # Color formatting for price change
+            if change_24h > 0:
+                change_str = f"{Fore.GREEN}▲ {change_24h:.2f}%{Style.RESET_ALL}"
+            elif change_24h < 0:
+                change_str = f"{Fore.RED}▼ {abs(change_24h):.2f}%{Style.RESET_ALL}"
+            else:
+                change_str = f"{Fore.YELLOW}— {change_24h:.2f}%{Style.RESET_ALL}"
+            
+            # Trend indicator
+            trend = self.get_trend_indicator(coin)
+            
+            table.add_row([
+                coin.capitalize(),
+                formatted_price,
+                change_str,
+                f"{symbol}{self.format_large_number(market_cap)}",
+                f"{symbol}{self.format_large_number(volume_24h)}",
+                trend
+            ])
+        
+        print(table)
+    
+    def display_header(self):
+        """Display application header with status"""
+        print(f"\n{Fore.CYAN}{'='*80}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'🚀 CRYPTOCURRENCY PRICE TRACKER':^80}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'='*80}{Style.RESET_ALL}")
+        
+        if self.last_update:
+            update_time = self.last_update.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"{Fore.YELLOW}📅 Last Updated: {update_time} | 🔄 Refresh: {self.refresh_interval}s | 📊 API Calls: {self.request_count}{Style.RESET_ALL}")
+        
+        if self.alerts:
+            print(f"{Fore.MAGENTA}🔔 Active Alerts: {len(self.alerts)}{Style.RESET_ALL}")
+        
+        print()
+    
+    def display_menu(self):
+        """Display interactive menu options"""
+        print(f"\n{Fore.CYAN}{'─'*80}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}📋 MENU OPTIONS:{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW}[1]{Style.RESET_ALL} Change Coins  {Fore.YELLOW}[2]{Style.RESET_ALL} Change Currency  {Fore.YELLOW}[3]{Style.RESET_ALL} Set Refresh Interval")
+        print(f"  {Fore.YELLOW}[4]{Style.RESET_ALL} Set Price Alert  {Fore.YELLOW}[5]{Style.RESET_ALL} View Coin Details  {Fore.YELLOW}[6]{Style.RESET_ALL} Export Data")
+        print(f"  {Fore.YELLOW}[Q]{Style.RESET_ALL} Quit  {Fore.YELLOW}[Enter]{Style.RESET_ALL} Continue Monitoring")
+        print(f"{Fore.CYAN}{'─'*80}{Style.RESET_ALL}\n")
+    
+    def change_coins(self):
+        """Allow user to select different coins to track"""
+        print(f"\n{Fore.CYAN}Available Coins:{Style.RESET_ALL}")
+        for i, coin in enumerate(self.default_coins, 1):
+            print(f"{i}. {coin.capitalize()}")
+        
+        print(f"\n{Fore.YELLOW}Enter coin numbers separated by commas (e.g., 1,2,3,4,5):{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Or press Enter for default selection{Style.RESET_ALL}")
+        
+        choice = input("Your choice: ").strip()
+        
+        if not choice:
+            return
+        
+        try:
+            indices = [int(x.strip()) - 1 for x in choice.split(",")]
+            self.selected_coins = [self.default_coins[i] for i in indices if 0 <= i < len(self.default_coins)]
+            print(f"{Fore.GREEN}✅ Coins updated!{Style.RESET_ALL}")
+            time.sleep(1)
+        except (ValueError, IndexError):
+            print(f"{Fore.RED}❌ Invalid input!{Style.RESET_ALL}")
+            time.sleep(1)
+    
+    def change_currency(self):
+        """Allow user to change display currency"""
+        print(f"\n{Fore.CYAN}Available Currencies:{Style.RESET_ALL}")
+        for i, curr in enumerate(self.currencies, 1):
+            print(f"{i}. {curr.upper()}")
+        
+        choice = input("\nEnter currency number: ").strip()
+        
+        try:
+            index = int(choice) - 1
+            if 0 <= index < len(self.currencies):
+                self.selected_currency = self.currencies[index]
+                print(f"{Fore.GREEN}✅ Currency changed to {self.selected_currency.upper()}!{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}❌ Invalid choice!{Style.RESET_ALL}")
+        except ValueError:
+            print(f"{Fore.RED}❌ Invalid input!{Style.RESET_ALL}")
+        
+        time.sleep(1)
+    
+    def set_refresh_interval(self):
+        """Allow user to set custom refresh interval"""
+        print(f"\n{Fore.YELLOW}Current refresh interval: {self.refresh_interval}s{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Enter new interval in seconds (5-300):{Style.RESET_ALL}")
+        
+        try:
+            interval = int(input("Interval: ").strip())
+            if 5 <= interval <= 300:
+                self.refresh_interval = interval
+                print(f"{Fore.GREEN}✅ Refresh interval set to {interval}s!{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}❌ Interval must be between 5 and 300 seconds!{Style.RESET_ALL}")
+        except ValueError:
+            print(f"{Fore.RED}❌ Invalid input!{Style.RESET_ALL}")
+        
+        time.sleep(1)
+    
+    def set_price_alert(self):
+        """Set price alerts for cryptocurrencies"""
+        print(f"\n{Fore.CYAN}Set Price Alert:{Style.RESET_ALL}")
+        print("Available coins:", ", ".join([c.capitalize() for c in self.selected_coins]))
+        
+        coin = input("Enter coin name: ").strip().lower()
+        
+        if coin not in self.selected_coins:
+            print(f"{Fore.RED}❌ Coin not in your tracking list!{Style.RESET_ALL}")
+            time.sleep(1)
+            return
+        
+        print(f"\n{Fore.YELLOW}Alert type:{Style.RESET_ALL}")
+        print("1. Alert when price goes above")
+        print("2. Alert when price goes below")
+        
+        alert_type = input("Choice (1/2): ").strip()
+        
+        try:
+            price = float(input("Enter price threshold: ").strip())
+            
+            if coin not in self.alerts:
+                self.alerts[coin] = {}
+            
+            if alert_type == "1":
+                self.alerts[coin]["above"] = price
+                print(f"{Fore.GREEN}✅ Alert set: Notify when {coin} goes above ${price}!{Style.RESET_ALL}")
+            elif alert_type == "2":
+                self.alerts[coin]["below"] = price
+                print(f"{Fore.GREEN}✅ Alert set: Notify when {coin} goes below ${price}!{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}❌ Invalid choice!{Style.RESET_ALL}")
+                
+        except ValueError:
+            print(f"{Fore.RED}❌ Invalid price!{Style.RESET_ALL}")
+        
+        time.sleep(1)
+    
+    def view_coin_details(self):
+        """Display detailed information about a specific coin"""
+        print(f"\n{Fore.CYAN}View Coin Details:{Style.RESET_ALL}")
+        print("Available coins:", ", ".join([c.capitalize() for c in self.selected_coins]))
+        
+        coin = input("Enter coin name: ").strip().lower()
+        
+        if coin not in self.selected_coins:
+            print(f"{Fore.RED}❌ Coin not in your tracking list!{Style.RESET_ALL}")
+            time.sleep(2)
+            return
+        
+        print(f"\n{Fore.YELLOW}Fetching details for {coin.capitalize()}...{Style.RESET_ALL}")
+        details = self.get_detailed_coin_info(coin)
+        
+        if details:
+            print(f"\n{Fore.CYAN}{'='*80}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}📊 {details['name']} ({details['symbol'].upper()}){Style.RESET_ALL}")
+            print(f"{Fore.CYAN}{'='*80}{Style.RESET_ALL}")
+            print(f"\n{Fore.YELLOW}Description:{Style.RESET_ALL}")
+            desc = details.get('description', {}).get('en', 'No description available')[:300]
+            print(f"{desc}...")
+            print(f"\n{Fore.YELLOW}Market Data:{Style.RESET_ALL}")
+            print(f"  • Rank: #{details.get('market_cap_rank', 'N/A')}")
+            print(f"  • All-Time High: ${details.get('market_data', {}).get('ath', {}).get('usd', 'N/A')}")
+            print(f"  • All-Time Low: ${details.get('market_data', {}).get('atl', {}).get('usd', 'N/A')}")
+            print(f"{Fore.CYAN}{'='*80}{Style.RESET_ALL}")
+        
+        input("\nPress Enter to continue...")
+    
+    def export_data(self, data: Dict):
+        """Export current data to JSON file"""
+        try:
+            filename = f"crypto_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
+            export_data = {
+                "timestamp": datetime.now().isoformat(),
+                "currency": self.selected_currency,
+                "prices": data
+            }
+            
+            with open(filename, 'w') as f:
+                json.dump(export_data, f, indent=2)
+            
+            print(f"\n{Fore.GREEN}✅ Data exported to {filename}!{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"\n{Fore.RED}❌ Error exporting data: {e}{Style.RESET_ALL}")
+        
+        time.sleep(2)
+    
+    def run(self):
+        """Main application loop"""
+        print(f"{Fore.CYAN}🚀 Starting Crypto Tracker...{Style.RESET_ALL}")
+        time.sleep(1)
+        
+        try:
+            while True:
+                self.clear_screen()
+                self.display_header()
+                
+                # Fetch and display prices
+                data = self.get_crypto_prices()
+                
+                if data:
+                    self.display_prices(data)
+                    self.check_price_alerts(data)
+                else:
+                    print(f"{Fore.RED}⚠️ Unable to fetch data. Retrying in {self.refresh_interval} seconds...{Style.RESET_ALL}")
+                
+                self.display_menu()
+                
+                # Non-blocking input with timeout
+                print(f"{Fore.YELLOW}Next refresh in {self.refresh_interval}s... (Enter option or wait){Style.RESET_ALL}")
+                
+                start_time = time.time()
+                user_input = None
+                
+                # Simple timeout simulation (not perfect but works)
+                while time.time() - start_time < self.refresh_interval:
+                    if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                        user_input = input().strip().lower()
+                        break
+                    time.sleep(0.1)
+                
+                # Handle user input
+                if user_input:
+                    if user_input == 'q':
+                        break
+                    elif user_input == '1':
+                        self.change_coins()
+                    elif user_input == '2':
+                        self.change_currency()
+                    elif user_input == '3':
+                        self.set_refresh_interval()
+                    elif user_input == '4':
+                        self.set_price_alert()
+                    elif user_input == '5':
+                        self.view_coin_details()
+                    elif user_input == '6':
+                        if data:
+                            self.export_data(data)
+                
+        except KeyboardInterrupt:
+            print(f"\n\n{Fore.YELLOW}👋 Tracker stopped by user.{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"\n{Fore.RED}❌ Unexpected error: {e}{Style.RESET_ALL}")
+        finally:
+            print(f"{Fore.GREEN}Thank you for using Crypto Tracker! 🚀{Style.RESET_ALL}\n")
+
+def main():
+    """Entry point for the application"""
+    try:
+        # For non-blocking input, import select (Unix-like systems)
+        import select
+        globals()['select'] = select
+    except ImportError:
+        # Fallback for Windows - use simpler blocking approach
+        class FakeSelect:
+            @staticmethod
+            def select(*args):
+                return [[], [], []]
+        globals()['select'] = FakeSelect()
+    
+    tracker = CryptoTracker()
+    tracker.run()
 
 if __name__ == "__main__":
     main()
